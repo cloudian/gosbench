@@ -10,7 +10,7 @@
 ## Server TODOs
 
 * Set Grafana annotations when tests start and when they end (at best as region)
-* Add timeout when waiting for workers (or whenever we could deadlock)
+* Add timeout when waiting for drivers (or whenever we could deadlock)
 
 ## Misc
 

@@ -7,9 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"math/rand"
 	"net"
 	"os"
+	"strings"
+	"text/tabwriter"
 	"time"
 
 	"github.com/mulbc/gosbench/common"
@@ -25,6 +28,7 @@ func init() {
 	rand.Seed(time.Now().UnixNano())
 
 	flag.StringVar(&configFileLocation, "c", "", "Config file describing test run")
+	flag.StringVar(&s3FileLocation, "s", "", "S3 configuration information")
 	flag.IntVar(&serverPort, "p", 2000, "Port on which the server will be available for clients. Default: 2000")
 	flag.BoolVar(&debug, "d", false, "enable debug log output")
 	flag.BoolVar(&trace, "t", false, "enable trace log output")
@@ -43,42 +47,94 @@ func init() {
 }
 
 var configFileLocation string
+var s3FileLocation string
 var serverPort int
-var readyWorkers chan *net.Conn
+var readyDrivers chan *net.Conn
+var done bool = false
 var debug, trace bool
+var listener net.Listener
 
-func loadConfigFromFile(configFileContent []byte) common.Testconf {
-	var config common.Testconf
-	err := yaml.Unmarshal(configFileContent, &config)
-	if err != nil {
-		log.WithError(err).Fatalf("Error unmarshaling config file:")
+func loadS3ConfigFromFile(s3FileContent []byte) []*common.S3Configuration {
+	var s3Config []*common.S3Configuration
+	var err error
+
+	if strings.HasSuffix(s3FileLocation, ".yaml") {
+		err = yaml.Unmarshal(s3FileContent, &s3Config)
+		if err != nil {
+			log.WithError(err).Fatalf("Error unmarshaling yaml s3 config file:")
+		}
+	} else if strings.HasSuffix(s3FileLocation, ".json") {
+		err = json.Unmarshal(s3FileContent, &s3Config)
+		if err != nil {
+			log.WithError(err).Fatalf("Error unmarshaling json S3 config file:")
+		}
+	} else {
+		log.WithError(err).Fatalf("S3 configuration file must be a yaml or json formatted file")
 	}
-	return config
+	return s3Config
+}
+
+func loadConfigFromFile(configFileContent []byte) common.Workloadconf {
+	var workload common.Workloadconf
+	var err error
+
+	if strings.HasSuffix(configFileLocation, ".yaml") {
+		err = yaml.Unmarshal(configFileContent, &workload)
+		if err != nil {
+			log.WithError(err).Fatalf("Error unmarshaling yaml config file:")
+		}
+	} else if strings.HasSuffix(configFileLocation, ".json") {
+		err = json.Unmarshal(configFileContent, &workload)
+		if err != nil {
+			log.WithError(err).Fatalf("Error unmarshaling json config file:")
+		}
+	} else {
+		log.WithError(err).Fatalf("Configuration file must be a yaml or json formatted file")
+	}
+	return workload
 }
 
 func main() {
+
 	configFileContent, err := ioutil.ReadFile(configFileLocation)
 	if err != nil {
-		log.WithError(err).Fatalf("Error reading config file:")
+		log.WithError(err).Fatalf("Error reading workload config file:")
 	}
-	config := loadConfigFromFile(configFileContent)
+
+	workload := loadConfigFromFile(configFileContent)
+
+	s3FileContent, err := ioutil.ReadFile(s3FileLocation)
+	if err != nil {
+		log.WithError(err).Fatalf("Error reading S3vconfig file:")
+	}
+
+	s3Config := loadS3ConfigFromFile(s3FileContent)
+
+	config := common.Testconf{
+		S3Config:      s3Config,
+		GrafanaConfig: workload.GrafanaConfig,
+		Tests:         workload.Tests,
+	}
+
 	common.CheckConfig(config)
 
-	readyWorkers = make(chan *net.Conn)
-	defer close(readyWorkers)
+	readyDrivers = make(chan *net.Conn)
+	defer close(readyDrivers)
 
 	// Listen on TCP port 2000 on all available unicast and
 	// anycast IP addresses of the local system.
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
+	listener, err = net.Listen("tcp", fmt.Sprintf(":%d", serverPort))
 	if err != nil {
 		log.WithError(err).Fatal("Could not open port!")
 	}
-	defer l.Close()
 	log.Info("Ready to accept connections")
 	go scheduleTests(config)
 	for {
 		// Wait for a connection.
-		conn, err := l.Accept()
+		conn, err := listener.Accept()
+		if done {
+			break
+		}
 		if err != nil {
 			log.WithError(err).Fatal("Issue when waiting for connection of clients")
 		}
@@ -96,84 +152,103 @@ func main() {
 				return
 			}
 			if message == "ready for work" {
-				log.Debug("We have a new worker!")
-				readyWorkers <- c
+				log.Debug("We have a new driver!")
+				readyDrivers <- c
 				return
 			}
 		}(&conn)
-		// Shut down the connection.
-		// defer conn.Close()
+
 	}
+
+	log.Infof("Shutting down server")
 }
 
 func scheduleTests(config common.Testconf) {
 
+	var maxDrivers int = 0
+
 	for testNumber, test := range config.Tests {
 
-		doneChannel := make(chan bool, test.Workers)
-		resultChannel := make(chan common.BenchmarkResult, test.Workers)
-		continueWorkers := make(chan bool, test.Workers)
-		defer close(doneChannel)
-		defer close(continueWorkers)
+		doneChannel := make(chan bool, test.Drivers)
+		resultChannel := make(chan common.BenchmarkResult, test.Drivers)
+		continueDrivers := make(chan bool, test.Drivers)
 
-		for worker := 0; worker < test.Workers; worker++ {
-			workerConfig := &common.WorkerConf{
+		maxDrivers = int(math.Max(float64(test.Drivers), float64(maxDrivers)))
+
+		for driver := 0; driver < test.Drivers; driver++ {
+			driverConfig := &common.DriverConf{
 				Test:     test,
-				S3Config: config.S3Config[worker%len(config.S3Config)],
-				WorkerID: fmt.Sprintf("w%d", worker),
+				S3Config: config.S3Config[driver%len(config.S3Config)],
+				DriverID: fmt.Sprintf("d%d", driver),
 			}
-			workerConnection := <-readyWorkers
-			log.WithField("Worker", (*workerConnection).RemoteAddr()).Infof("We found worker %d / %d for test %d", worker+1, test.Workers, testNumber)
-			go executeTestOnWorker(workerConnection, workerConfig, doneChannel, continueWorkers, resultChannel)
+			driverConnection := <-readyDrivers
+			log.WithField("Driver", (*driverConnection).RemoteAddr()).Infof("We found driver %d / %d for test %d", driver+1, test.Drivers, testNumber)
+			go executeTestOnDriver(driverConnection, driverConfig, doneChannel, continueDrivers, resultChannel)
 		}
-		for worker := 0; worker < test.Workers; worker++ {
-			// Will halt until all workers are done with preparations
+		for driver := 0; driver < test.Drivers; driver++ {
+			// Will halt until all driverss are done with preparations
 			<-doneChannel
 		}
 		// Add sleep after prep phase so that drives can relax
 		time.Sleep(5 * time.Second)
-		log.WithField("test", test.Name).Info("All workers have finished preparations - starting performance test")
+		log.WithField("test", test.Name).Info("All drivers have finished preparations - starting performance test")
 		startTime := time.Now().UTC()
-		for worker := 0; worker < test.Workers; worker++ {
-			continueWorkers <- true
+		for driver := 0; driver < test.Drivers; driver++ {
+			continueDrivers <- true
 		}
 		var benchResults []common.BenchmarkResult
-		for worker := 0; worker < test.Workers; worker++ {
-			// Will halt until all workers are done with their work
+		for driver := 0; driver < test.Drivers; driver++ {
+			// Will halt until all drivers are done with their work
 			<-doneChannel
 			benchResults = append(benchResults, <-resultChannel)
 		}
-		log.WithField("test", test.Name).Info("All workers have finished the performance test - continuing with next test")
 		stopTime := time.Now().UTC()
+		log.WithField("test", test.Name).Info("All drivers have finished the performance test - continuing with next test")
 		log.WithField("test", test.Name).Infof("GRAFANA: ?from=%d&to=%d", startTime.UnixNano()/int64(1000000), stopTime.UnixNano()/int64(1000000))
 		benchResult := sumBenchmarkResults(benchResults)
+		benchResult.StartTime = startTime
+		benchResult.StopTime = stopTime
 		benchResult.Duration = stopTime.Sub(startTime)
 		log.WithField("test", test.Name).
-			WithField("Total Operations", benchResult.Operations).
+			WithField("Operation Name", benchResult.OperationName).
+			WithField("Drivers", benchResult.Workers).
+			WithField("Object Size", benchResult.ObjectSize).
+			WithField("Completed Operations", benchResult.Operations).
+			WithField("Failed Operations", benchResult.FailedOperations).
+			WithField("Ops Per Second", benchResult.OpsPerSecond).
 			WithField("Total Bytes", benchResult.Bytes).
 			WithField("Average BW in Byte/s", benchResult.Bandwidth).
 			WithField("Average latency in ms", benchResult.LatencyAvg).
+			WithField("Success Ratio", benchResult.SuccessRatio).
+			WithField("Start Time", benchResult.StartTime).
+			WithField("Stop Time", benchResult.StopTime).
 			WithField("Test runtime on server", benchResult.Duration).
 			Infof("PERF RESULTS")
 		writeResultToCSV(benchResult)
+		writeResultToConsole(benchResults, benchResult)
+		close(doneChannel)
+		close(continueDrivers)
+		close(resultChannel)
 	}
 	log.Info("All performance tests finished")
-	for {
-		workerConnection := <-readyWorkers
-		shutdownWorker(workerConnection)
+	for driver := 0; driver < maxDrivers; driver++ {
+		driverConnection := <-readyDrivers
+		shutdownDriver(driverConnection)
 	}
+	done = true
+	listener.Close()
 }
 
-func executeTestOnWorker(conn *net.Conn, config *common.WorkerConf, doneChannel chan bool, continueWorkers chan bool, resultChannel chan common.BenchmarkResult) {
+func executeTestOnDriver(conn *net.Conn, config *common.DriverConf, doneChannel chan bool, continueDrivers chan bool, resultChannel chan common.BenchmarkResult) {
 	encoder := json.NewEncoder(*conn)
 	decoder := json.NewDecoder(*conn)
-	_ = encoder.Encode(common.WorkerMessage{Message: "init", Config: config})
+	_ = encoder.Encode(common.DriverMessage{Message: "init", Config: config})
 
-	var response common.WorkerMessage
+	var response common.DriverMessage
 	for {
 		err := decoder.Decode(&response)
 		if err != nil {
-			log.WithField("worker", config.WorkerID).WithField("message", response).WithError(err).Error("Worker responded unusually - dropping")
+			log.WithField("driver", config.DriverID).WithField("message", response).WithError(err).Error("Driver responded unusually - dropping")
 			(*conn).Close()
 			return
 		}
@@ -181,8 +256,8 @@ func executeTestOnWorker(conn *net.Conn, config *common.WorkerConf, doneChannel 
 		switch response.Message {
 		case "preparations done":
 			doneChannel <- true
-			<-continueWorkers
-			_ = encoder.Encode(common.WorkerMessage{Message: "start work"})
+			<-continueDrivers
+			_ = encoder.Encode(common.DriverMessage{Message: "start work"})
 		case "work done":
 			doneChannel <- true
 			resultChannel <- response.BenchResult
@@ -192,24 +267,33 @@ func executeTestOnWorker(conn *net.Conn, config *common.WorkerConf, doneChannel 
 	}
 }
 
-func shutdownWorker(conn *net.Conn) {
+func shutdownDriver(conn *net.Conn) {
 	encoder := json.NewEncoder(*conn)
-	log.WithField("Worker", (*conn).RemoteAddr()).Info("Shutting down worker")
-	_ = encoder.Encode(common.WorkerMessage{Message: "shutdown"})
+	log.WithField("Driver", (*conn).RemoteAddr()).Info("Shutting down driver")
+	_ = encoder.Encode(common.DriverMessage{Message: "shutdown"})
 }
 
 func sumBenchmarkResults(results []common.BenchmarkResult) common.BenchmarkResult {
 	sum := common.BenchmarkResult{}
 	bandwidthAverages := float64(0)
 	latencyAverages := float64(0)
+	objectSizeAverages := float64(0)
 	for _, result := range results {
 		sum.Bytes += result.Bytes
 		sum.Operations += result.Operations
+		sum.FailedOperations += result.FailedOperations
 		latencyAverages += result.LatencyAvg
 		bandwidthAverages += result.Bandwidth
+		objectSizeAverages += result.ObjectSize
+		sum.OpsPerSecond += result.OpsPerSecond
+		sum.Workers += result.Workers
 	}
+	sum.SuccessRatio = sum.Operations / (sum.Operations + sum.FailedOperations)
 	sum.LatencyAvg = latencyAverages / float64(len(results))
+	sum.ObjectSize = objectSizeAverages / float64(len(results))
 	sum.TestName = results[0].TestName
+	sum.OperationName = results[0].OperationName
+	sum.Options = results[0].Options
 	sum.Bandwidth = bandwidthAverages
 	return sum
 }
@@ -226,12 +310,21 @@ func writeResultToCSV(benchResult common.BenchmarkResult) {
 
 	if created {
 		err = csvwriter.Write([]string{
-			"testName",
-			"Total Operations",
+			"TestName",
+			"Operation Name",
+			"Workers",
+			"Object Size",
+			"Completed Operations",
+			"Failed Operations",
+			"Ops/Second",
 			"Total Bytes",
-			"Average Bandwidth in Bytes/s",
+			"Bandwidth in Bytes/s",
 			"Average Latency in ms",
+			"Success Ratio",
+			"Start Time",
+			"Stop Time",
 			"Test duration seen by server in seconds",
+			"Test Options",
 		})
 		if err != nil {
 			log.WithError(err).Error("Failed writing line to results csv")
@@ -241,11 +334,20 @@ func writeResultToCSV(benchResult common.BenchmarkResult) {
 
 	err = csvwriter.Write([]string{
 		benchResult.TestName,
+		benchResult.OperationName,
+		fmt.Sprintf("%d", benchResult.Workers),
+		fmt.Sprintf("%.0f", benchResult.ObjectSize),
 		fmt.Sprintf("%.0f", benchResult.Operations),
+		fmt.Sprintf("%.0f", benchResult.FailedOperations),
+		fmt.Sprintf("%f", benchResult.OpsPerSecond),
 		fmt.Sprintf("%.0f", benchResult.Bytes),
 		fmt.Sprintf("%f", benchResult.Bandwidth),
 		fmt.Sprintf("%f", benchResult.LatencyAvg),
+		fmt.Sprintf("%.2f", benchResult.SuccessRatio),
+		fmt.Sprintf("%d", benchResult.StartTime.Unix()),
+		fmt.Sprintf("%d", benchResult.StopTime.Unix()),
 		fmt.Sprintf("%f", benchResult.Duration.Seconds()),
+		benchResult.Options,
 	})
 	if err != nil {
 		log.WithError(err).Error("Failed writing line to results csv")
@@ -277,4 +379,21 @@ func getCSVFileHandle() (*os.File, bool, error) {
 
 	return nil, false, errors.New("Could not find previous CSV for appending and could not write new CSV file to current dir and /tmp/ giving up")
 
+}
+
+func writeResultToConsole(driverResult []common.BenchmarkResult, summedResults common.BenchmarkResult) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.AlignRight)
+	fmt.Fprintln(w, "HOST\tTEST NAME\tOP NAME\tWORKERS\tOBJECT SIZE\tCOMPLETED OPS\tFAILED OPS\tOPS PER SECOND\tTOTAL MB\tBANDWIDTH (MB)\tLATENCY\tSUCCESS RATIO\tDURATION\t")
+	for _, result := range driverResult {
+		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%.0f\t%.0f\t%.0f\t%.2f ops/sec\t%.2f MB\t%.2f MB/s\t%.2f ms\t%.2f%%\t%.2f s\t\n",
+			result.Host, result.TestName, result.OperationName, result.Workers, result.ObjectSize, result.Operations,
+			result.FailedOperations, result.OpsPerSecond, result.Bytes/(1024*1024), result.Bandwidth/(1024*1024),
+			result.LatencyAvg, result.SuccessRatio*100, result.Duration.Seconds())
+	}
+	fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%.0f\t%.0f\t%.0f\t%.2f ops/sec\t%.2f MB\t%.2f MB/s\t%.2f ms\t%.2f%%\t%.2f s\t\n",
+		"Totals", summedResults.TestName, summedResults.OperationName, summedResults.Workers, summedResults.ObjectSize,
+		summedResults.Operations, summedResults.FailedOperations, summedResults.OpsPerSecond, summedResults.Bytes/(1024*1024),
+		summedResults.Bandwidth/(1024*1024), summedResults.LatencyAvg, summedResults.SuccessRatio*100, summedResults.Duration.Seconds())
+
+	w.Flush()
 }

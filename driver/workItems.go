@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -26,30 +27,42 @@ type ReadOperation struct {
 	ObjectName               string
 	ObjectSize               uint64
 	WorksOnPreexistingObject bool
+	MPUEnabled               bool
+	PartSize                 uint64
+	MPUConcurrency           int
 }
 
 // WriteOperation stands for a write operation
 type WriteOperation struct {
-	TestName   string
-	Bucket     string
-	ObjectName string
-	ObjectSize uint64
+	TestName       string
+	Bucket         string
+	ObjectName     string
+	ObjectSize     uint64
+	MPUEnabled     bool
+	PartSize       uint64
+	MPUConcurrency int
 }
 
 // ListOperation stands for a list operation
 type ListOperation struct {
-	TestName   string
-	Bucket     string
-	ObjectName string
-	ObjectSize uint64
+	TestName       string
+	Bucket         string
+	ObjectName     string
+	ObjectSize     uint64
+	MPUEnabled     bool
+	PartSize       uint64
+	MPUConcurrency int
 }
 
 // DeleteOperation stands for a delete operation
 type DeleteOperation struct {
-	TestName   string
-	Bucket     string
-	ObjectName string
-	ObjectSize uint64
+	TestName       string
+	Bucket         string
+	ObjectName     string
+	ObjectSize     uint64
+	MPUEnabled     bool
+	PartSize       uint64
+	MPUConcurrency int
 }
 
 // Stopper marks the end of a workqueue when using
@@ -105,7 +118,17 @@ func (op ReadOperation) Prepare() error {
 	if op.WorksOnPreexistingObject {
 		return nil
 	}
-	return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(generateRandomBytes(op.ObjectSize)), op.Bucket)
+	if op.MPUEnabled {
+		if op.PartSize == 0 {
+			op.PartSize = s3manager.DefaultDownloadPartSize
+		}
+		if op.MPUConcurrency == 0 {
+			op.MPUConcurrency = s3manager.DefaultDownloadConcurrency
+		}
+		return putObjectMPU(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, op.PartSize, op.MPUConcurrency)
+	} else {
+		return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, int64(op.ObjectSize))
+	}
 }
 
 // Prepare prepares the execution of the WriteOperation
@@ -117,13 +140,34 @@ func (op WriteOperation) Prepare() error {
 // Prepare prepares the execution of the ListOperation
 func (op ListOperation) Prepare() error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Preparing ListOperation")
-	return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(generateRandomBytes(op.ObjectSize)), op.Bucket)
+
+	if op.MPUEnabled {
+		if op.PartSize == 0 {
+			op.PartSize = uint64(s3manager.DefaultUploadPartSize)
+		}
+		if op.MPUConcurrency == 0 {
+			op.MPUConcurrency = s3manager.DefaultUploadConcurrency
+		}
+		return putObjectMPU(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, op.PartSize, op.MPUConcurrency)
+	} else {
+		return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, int64(op.ObjectSize))
+	}
 }
 
 // Prepare prepares the execution of the DeleteOperation
 func (op DeleteOperation) Prepare() error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Preparing DeleteOperation")
-	return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(generateRandomBytes(op.ObjectSize)), op.Bucket)
+	if op.MPUEnabled {
+		if op.PartSize == 0 {
+			op.PartSize = uint64(s3manager.DefaultUploadPartSize)
+		}
+		if op.MPUConcurrency == 0 {
+			op.MPUConcurrency = s3manager.DefaultUploadConcurrency
+		}
+		return putObjectMPU(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, op.PartSize, op.MPUConcurrency)
+	} else {
+		return putObject(housekeepingSvc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, int64(op.ObjectSize))
+	}
 }
 
 // Prepare does nothing here
@@ -134,8 +178,14 @@ func (op Stopper) Prepare() error {
 // Do executes the actual work of the ReadOperation
 func (op ReadOperation) Do() error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).WithField("Preexisting?", op.WorksOnPreexistingObject).Debug("Doing ReadOperation")
+	if op.PartSize == 0 {
+		op.PartSize = s3manager.DefaultDownloadPartSize
+	}
+	if op.MPUConcurrency == 0 {
+		op.MPUConcurrency = s3manager.DefaultDownloadConcurrency
+	}
 	start := time.Now()
-	err := getObject(svc, op.ObjectName, op.Bucket)
+	err := getObject(svc, op.ObjectName, op.Bucket, op.PartSize, op.MPUConcurrency)
 	duration := time.Since(start)
 	promLatency.WithLabelValues(op.TestName, "GET").Observe(float64(duration.Milliseconds()))
 	if err != nil {
@@ -150,9 +200,23 @@ func (op ReadOperation) Do() error {
 // Do executes the actual work of the WriteOperation
 func (op WriteOperation) Do() error {
 	log.WithField("bucket", op.Bucket).WithField("object", op.ObjectName).Debug("Doing WriteOperation")
-	start := time.Now()
-	err := putObject(svc, op.ObjectName, bytes.NewReader(generateRandomBytes(op.ObjectSize)), op.Bucket)
-	duration := time.Since(start)
+	var err error
+	var duration time.Duration
+	if op.MPUEnabled {
+		if op.PartSize == 0 {
+			op.PartSize = uint64(s3manager.DefaultUploadPartSize)
+		}
+		if op.MPUConcurrency == 0 {
+			op.MPUConcurrency = s3manager.DefaultUploadConcurrency
+		}
+		start := time.Now()
+		err = putObjectMPU(svc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, op.PartSize, op.MPUConcurrency)
+		duration = time.Since(start)
+	} else {
+		start := time.Now()
+		err = putObject(svc, op.ObjectName, bytes.NewReader(randomData[:op.ObjectSize]), op.Bucket, int64(op.ObjectSize))
+		duration = time.Since(start)
+	}
 	promLatency.WithLabelValues(op.TestName, "PUT").Observe(float64(duration.Milliseconds()))
 	if err != nil {
 		promFailedOps.WithLabelValues(op.TestName, "PUT").Inc()

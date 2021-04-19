@@ -5,13 +5,17 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/request"
 	"github.com/aws/aws-sdk-go/aws/session"
+	v4 "github.com/aws/aws-sdk-go/aws/signer/v4"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	log "github.com/sirupsen/logrus"
@@ -55,8 +59,35 @@ func InitS3(config common.S3Configuration) {
 	// Session should be shared where possible to take advantage of
 	// configuration and credential caching. See the session package for
 	// more information.
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipSSLVerify},
+
+	var tr *http.Transport
+	if config.ProxyHost != "" {
+		proxyUrl, err := url.Parse(config.ProxyHost)
+		if err != nil {
+			log.WithError(err).Fatalf("Unable to configure proxy:")
+		}
+		tr = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipSSLVerify},
+			Proxy:           http.ProxyURL(proxyUrl),
+			DialContext: (&net.Dialer{
+				KeepAlive: 15 * time.Second,
+				DualStack: true,
+				Timeout:   5 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+		}
+	} else {
+		tr = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: config.SkipSSLVerify},
+			DialContext: (&net.Dialer{
+				KeepAlive: 15 * time.Second,
+				DualStack: true,
+				Timeout:   5 * time.Second,
+			}).DialContext,
+			MaxIdleConns:        100,
+			MaxIdleConnsPerHost: 100,
+		}
 	}
 	tr2 := &ochttp.Transport{Base: tr}
 	hc = &http.Client{
@@ -66,19 +97,27 @@ func InitS3(config common.S3Configuration) {
 	sess := session.Must(session.NewSession(&aws.Config{
 		HTTPClient: hc,
 		// TODO Also set the remaining S3 connection details...
-		Region:           &config.Region,
-		Credentials:      credentials.NewStaticCredentials(config.AccessKey, config.SecretKey, ""),
-		Endpoint:         &config.Endpoint,
-		S3ForcePathStyle: aws.Bool(true),
+		Region:                            &config.Region,
+		Credentials:                       credentials.NewStaticCredentials(config.AccessKey, config.SecretKey, ""),
+		Endpoint:                          &config.Endpoint,
+		S3ForcePathStyle:                  aws.Bool(true),
+		S3DisableContentMD5Validation:     aws.Bool(true),
+		DisableComputeChecksums:           aws.Bool(true),
+		S3Disable100Continue:              aws.Bool(true),
+		EC2MetadataDisableTimeoutOverride: aws.Bool(true),
 	}))
 	// Use this Session to do things that are hidden from the performance monitoring
 	housekeepingSess := session.Must(session.NewSession(&aws.Config{
 		HTTPClient: &http.Client{Transport: tr},
 		// TODO Also set the remaining S3 connection details...
-		Region:           &config.Region,
-		Credentials:      credentials.NewStaticCredentials(config.AccessKey, config.SecretKey, ""),
-		Endpoint:         &config.Endpoint,
-		S3ForcePathStyle: aws.Bool(true),
+		Region:                            &config.Region,
+		Credentials:                       credentials.NewStaticCredentials(config.AccessKey, config.SecretKey, ""),
+		Endpoint:                          &config.Endpoint,
+		S3ForcePathStyle:                  aws.Bool(true),
+		S3DisableContentMD5Validation:     aws.Bool(true),
+		DisableComputeChecksums:           aws.Bool(true),
+		S3Disable100Continue:              aws.Bool(true),
+		EC2MetadataDisableTimeoutOverride: aws.Bool(true),
 	}))
 
 	// Create a new instance of the service's client with a Session.
@@ -95,7 +134,66 @@ func InitS3(config common.S3Configuration) {
 	log.Debug("S3 Init done")
 }
 
-func putObject(service *s3.S3, objectName string, objectContent io.ReadSeeker, bucket string) error {
+func putObject(service *s3.S3, objectName string, objectContent io.ReadSeeker, bucket string, objectSize int64) error {
+	input := &s3.PutObjectInput{
+		Bucket:        &bucket,
+		Key:           &objectName,
+		Body:          objectContent,
+		ContentLength: &objectSize,
+	}
+
+	req, _ := service.PutObjectRequest(input)
+	req.Handlers.Sign.Remove(v4.SignRequestHandler)
+	handler := v4.BuildNamedHandler("v4.CustomSignerHandler", v4.WithUnsignedPayload)
+	req.Handlers.Sign.PushFrontNamed(handler)
+
+	err := req.Send()
+
+	//_, err := service.PutObject(input)
+	if err != nil {
+		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == request.CanceledErrorCode {
+			// If the SDK can determine the request or retry delay was canceled
+			// by a context the CanceledErrorCode error code will be returned.
+			log.WithError(aerr).Errorf("Upload canceled due to timeout")
+		} else {
+			log.WithError(err).WithField("object", objectName).WithField("bucket", bucket).Errorf("Failed to upload object,")
+		}
+		return err
+	}
+	log.WithField("bucket", bucket).WithField("key", objectName).Tracef("Upload successful")
+	return err
+}
+
+// func putObjectUnsigned(service *s3.S3, objectName string, objectContent io.ReadSeeker, bucket string) error {
+// 	input := &s3.PutObjectInput{
+// 		Bucket: &bucket,
+// 		Key:    &objectName,
+// 		Body:   objectContent,
+// 	}
+
+// 	req, _ := service.PutObjectRequest(input)
+// 	req.Handlers.Sign.Remove(v4.SignRequestHandler)
+// 	handler := v4.BuildNamedHandler("v4.CustomSignerHandler", v4.WithUnsignedPayload)
+// 	req.Handlers.Sign.PushFrontNamed(handler)
+
+// 	start := time.Now()
+// 	err := req.Send()
+// 	fmt.Println(time.Since(start))
+// 	if err != nil {
+// 		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == request.CanceledErrorCode {
+// 			// If the SDK can determine the request or retry delay was canceled
+// 			// by a context the CanceledErrorCode error code will be returned.
+// 			log.WithError(aerr).Errorf("Upload canceled due to timeout")
+// 		} else {
+// 			log.WithError(err).WithField("object", objectName).WithField("bucket", bucket).Errorf("Failed to upload object,")
+// 		}
+// 		return err
+// 	}
+// 	log.WithField("bucket", bucket).WithField("key", objectName).Tracef("Upload successful")
+// 	return err
+// }
+
+func putObjectMPU(service *s3.S3, objectName string, objectContent io.ReadSeeker, bucket string, partSize uint64, concurrency int) error {
 	// Create an uploader with S3 client and custom options
 	uploader := s3manager.NewUploaderWithClient(service)
 
@@ -104,7 +202,8 @@ func putObject(service *s3.S3, objectName string, objectContent io.ReadSeeker, b
 		Key:    &objectName,
 		Body:   objectContent,
 	}, func(d *s3manager.Uploader) {
-		d.MaxUploadParts = 1
+		d.PartSize = int64(partSize)
+		d.Concurrency = concurrency
 	})
 	if err != nil {
 		if aerr, ok := err.(awserr.Error); ok && aerr.Code() == request.CanceledErrorCode {
@@ -159,7 +258,7 @@ func listObjects(service *s3.S3, prefix string, bucket string) (*s3.ListObjectsO
 	return result, err
 }
 
-func getObject(service *s3.S3, objectName string, bucket string) error {
+func getObject(service *s3.S3, objectName string, bucket string, partSize uint64, concurrency int) error {
 	// Create a downloader with the session and custom options
 	downloader := s3manager.NewDownloaderWithClient(service)
 	buf := aws.NewWriteAtBuffer([]byte{})
@@ -167,7 +266,8 @@ func getObject(service *s3.S3, objectName string, bucket string) error {
 		Bucket: &bucket,
 		Key:    &objectName,
 	}, func(d *s3manager.Downloader) {
-		d.PartSize = 64 * 1024 * 1024 // 64MB parts
+		d.PartSize = int64(partSize)
+		d.Concurrency = concurrency
 	})
 	return err
 }

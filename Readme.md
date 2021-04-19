@@ -7,8 +7,8 @@ It is a distributed S3 performance benchmark tool with [Prometheus exporter](htt
 
 Gosbench consists of two parts:
 
-* Server: Coordinates Workers and general test queue
-* Workers: Actually connect to S3 and perform reading, writing, deleting and listing of objects
+* Server: Coordinates Drivers and general test queue
+* Drivers: Actually connect to S3 and perform reading, writing, deleting and listing of objects
 
 INFO: `-d` activates debug logging, `-t` activates trace logging
 
@@ -16,11 +16,11 @@ INFO: `-d` activates debug logging, `-t` activates trace logging
 
 1. Build the server: `go install github.com/mulbc/gosbench/server`
 1. Run the server, specifying a config file: `server -c path/to/config.yaml` - you can find an example config [in the example folder](examples/example_config.yaml)
-1. The server will open port 2000 for workers to connect to - make sure this port is not blocked by your firewall!
-1. Build the worker: `go install github.com/mulbc/gosbench/worker`
-1. Run the worker, specifying the server connection details: `worker -s 192.168.1.1:2000`
-1. The worker will immediately connect to the server and will start to get to work.
-The worker opens port 8888 for the Prometheus exporter. Please make sure this port is allowed in your firewall and that you added the worker to the Prometheus config.
+1. The server will open port 2000 for drivers to connect to - make sure this port is not blocked by your firewall!
+1. Build the driver: `go install github.com/mulbc/gosbench/driver`
+1. Run the driver, specifying the server connection details: `driver -s 192.168.1.1:2000`
+1. The driver will immediately connect to the server and will start to get to work.
+The driver opens port 8888 for the Prometheus exporter. Please make sure this port is allowed in your firewall and that you added the driver to the Prometheus config.
 
 #### Prometheus configuration
 
@@ -40,20 +40,20 @@ scrape_configs:
     scrape_interval: 1s
     static_configs:
       - targets:
-        - WORKER1.example.com:8888
-        - WORKER2.example.com:8888
+        - DRIVER1.example.com:8888
+        - DRIVER2.example.com:8888
 ```
 
 To reload the configuration, you can either send a SIGHUP to your prometheus server or just restart it ;)
-Afterwards ensure that you have your Gosbench workers listed at http://your.prometheus.server.example.com:9090/targets
+Afterwards ensure that you have your Gosbench drivers listed at http://your.prometheus.server.example.com:9090/targets
 
-It is expected that the workers are in state `DOWN` most of the time... they are only scrapeable during a test run.
+It is expected that the drivers are in state `DOWN` most of the time... they are only scrapeable during a test run.
 
 It is Best Practice to run the [Prometheus Node Exporter](https://github.com/prometheus/node_exporter) on all hosts as well, to gather common system metrics during the tests. This will help you in identifying bottlenecks. Please consult the Node Exporter manuals on how to install and configure it on your platform.
 
 ### Evaluating a test
 
-During a test, Prometheus will scrape the performance data continuously from the workers.
+During a test, Prometheus will scrape the performance data continuously from the drivers.
 You can visualize this data in Grafana. To get an overview of what the provided data looks like, check out [the example scrape](examples/example_prom_exporter.log).
 
 There is also an [example Grafana dashboard](examples/grafana_dashboard.json) that you can import and use. The Dashboard has some basic overview of the most common stats that people are interested in:
@@ -104,7 +104,7 @@ Just like with other operations, the `bucket_prefix` value will be evaluated to 
 
 Note: Due to the constant distribution, we will only consider the `_min` values.
 
-This will cause each workers to search for pre-existing files in the buckets `myBucket-0` and `myBucket-1` and read 10 objects from these buckets. If there are less than 10 objects in any of these buckets, some objects will be read multiple times. The object size given in your config will be ignored when reading pre-existing files.
+This will cause each drivers to search for pre-existing files in the buckets `myBucket-0` and `myBucket-1` and read 10 objects from these buckets. If there are less than 10 objects in any of these buckets, some objects will be read multiple times. The object size given in your config will be ignored when reading pre-existing files.
 
 ## Contributing
 
@@ -115,4 +115,4 @@ This will cause each workers to search for pre-existing files in the buckets `my
 
 ## Known issues
 
-* Workers will error out when the config's min value is larger than the max value (even for a constant distribution)
+* Drivers will error out when the config's min value is larger than the max value (even for a constant distribution)

@@ -8,6 +8,7 @@ import (
 )
 
 func Test_loadConfigFromFile(t *testing.T) {
+	configFileLocation = "test.yaml"
 	type args struct {
 		configFileContent []byte
 	}

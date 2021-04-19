@@ -16,9 +16,10 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-var config common.WorkerConf
+var config common.DriverConf
 var prometheusPort int
 var debug, trace bool
+var randomData []byte
 
 func init() {
 	log.SetFormatter(&log.TextFormatter{
@@ -66,7 +67,7 @@ func connectToServer(serverAddress string) error {
 
 	_ = encoder.Encode("ready for work")
 
-	var response common.WorkerMessage
+	var response common.DriverMessage
 	Workqueue := &Workqueue{
 		Queue: &[]WorkItem{},
 	}
@@ -83,8 +84,9 @@ func connectToServer(serverAddress string) error {
 			config = *response.Config
 			log.Info("Got config from server - starting preparations now")
 
+			randomData = generateRandomBytes(config.Test.Objects.SizeMax)
 			InitS3(*config.S3Config)
-			fillWorkqueue(config.Test, Workqueue, config.WorkerID, config.Test.WorkerShareBuckets)
+			fillWorkqueue(config.Test, Workqueue, config.DriverID, config.Test.DriversShareBuckets)
 
 			for _, work := range *Workqueue.Queue {
 				err = work.Prepare()
@@ -93,20 +95,25 @@ func connectToServer(serverAddress string) error {
 				}
 			}
 			log.Info("Preparations finished - waiting on server to start work")
-			_ = encoder.Encode(common.WorkerMessage{Message: "preparations done"})
+			_ = encoder.Encode(common.DriverMessage{Message: "preparations done"})
 		case "start work":
-			if config == (common.WorkerConf{}) || len(*Workqueue.Queue) == 0 {
+			if config == (common.DriverConf{}) || len(*Workqueue.Queue) == 0 {
 				log.Fatal("Was instructed to start work - but the preparation step is incomplete - reconnecting")
 				return nil
 			}
 			log.Info("Starting to work")
-			duration := PerfTest(config.Test, Workqueue, config.WorkerID)
-			benchResults := getCurrentPromValues(config.Test.Name)
+			duration := PerfTest(config.Test, Workqueue, config.DriverID)
+			benchResults := getCurrentPromValues(config.Test)
 			benchResults.Duration = duration
 			benchResults.Bandwidth = benchResults.Bytes / duration.Seconds()
-			log.Infof("PROM VALUES %+v", benchResults)
-			_ = encoder.Encode(common.WorkerMessage{Message: "work done", BenchResult: benchResults})
-			// Work is done - return to being a ready worker by reconnecting
+			benchResults.OpsPerSecond = benchResults.Operations / duration.Seconds()
+			log.Infof("PROM VALUES %s, %s, %s, %d, %.2f, %.2f, %.2f, %.2f ops/s, %.2f MB, %.2f MB/s, %.2f ms, %.2f%%, %.2f s, %s",
+				benchResults.Host, benchResults.TestName, benchResults.OperationName, benchResults.Workers, benchResults.ObjectSize,
+				benchResults.Operations, benchResults.FailedOperations, benchResults.OpsPerSecond, benchResults.Bytes/(1024*1024),
+				benchResults.Bandwidth/(1024*1024), benchResults.LatencyAvg, benchResults.SuccessRatio*100, benchResults.Duration.Seconds(),
+				benchResults.Options)
+			_ = encoder.Encode(common.DriverMessage{Message: "work done", BenchResult: benchResults})
+			// Work is done - return to being a ready driver by reconnecting
 			return nil
 		case "shutdown":
 			log.Info("Server told us to shut down - all work is done for today")
@@ -116,24 +123,24 @@ func connectToServer(serverAddress string) error {
 }
 
 // PerfTest runs a performance test as configured in testConfig
-func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, workerID string) time.Duration {
+func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, driverID string) time.Duration {
 	workChannel := make(chan WorkItem, len(*Workqueue.Queue))
 	doneChannel := make(chan bool)
 
 	startTime := time.Now().UTC()
 	promTestStart.WithLabelValues(testConfig.Name).Set(float64(startTime.UnixNano() / int64(1000000)))
 	// promTestGauge.WithLabelValues(testConfig.Name).Inc()
-	for worker := 0; worker < testConfig.ParallelClients; worker++ {
+	for worker := 0; worker < testConfig.Workers; worker++ {
 		go DoWork(workChannel, doneChannel)
 	}
-	log.Infof("Started %d parallel clients", testConfig.ParallelClients)
+	log.Infof("Started %d workers", testConfig.Workers)
 	if testConfig.Runtime != 0 {
 		workUntilTimeout(Workqueue, workChannel, testConfig.Runtime)
 	} else {
-		workUntilOps(Workqueue, workChannel, testConfig.OpsDeadline, testConfig.ParallelClients)
+		workUntilOps(Workqueue, workChannel, testConfig.OpsDeadline, testConfig.Workers)
 	}
 	// Wait for all the goroutines to finish
-	for i := 0; i < testConfig.ParallelClients; i++ {
+	for i := 0; i < testConfig.Workers; i++ {
 		<-doneChannel
 	}
 	log.Info("All clients finished")
@@ -149,14 +156,14 @@ func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, wo
 			}
 		}
 		for bucket := uint64(0); bucket < testConfig.Buckets.NumberMax; bucket++ {
-			err := deleteBucket(housekeepingSvc, fmt.Sprintf("%s%s%d", workerID, testConfig.BucketPrefix, bucket))
+			err := deleteBucket(housekeepingSvc, fmt.Sprintf("%s%s%d", driverID, testConfig.BucketPrefix, bucket))
 			if err != nil {
 				log.WithError(err).Error("Error during bucket deleting - ignoring")
 			}
 		}
 		log.Info("Housekeeping finished")
 	}
-	// Sleep to ensure Prometheus can still scrape the last information before we restart the worker
+	// Sleep to ensure Prometheus can still scrape the last information before we restart the driver
 	time.Sleep(10 * time.Second)
 	return endTime.Sub(startTime)
 }
@@ -216,7 +223,7 @@ func workUntilOps(Workqueue *Workqueue, workChannel chan WorkItem, maxOps uint64
 	}
 }
 
-func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, workerID string, shareBucketName bool) {
+func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, driverID string, shareBucketName bool) {
 
 	if testConfig.ReadWeight > 0 {
 		Workqueue.OperationValues = append(Workqueue.OperationValues, KV{Key: "read"})
@@ -236,7 +243,7 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 
 	bucketCount := common.EvaluateDistribution(testConfig.Buckets.NumberMin, testConfig.Buckets.NumberMax, &testConfig.Buckets.NumberLast, 1, testConfig.Buckets.NumberDistribution)
 	for bucket := uint64(0); bucket < bucketCount; bucket++ {
-		bucketName := fmt.Sprintf("%s%s%d", workerID, testConfig.BucketPrefix, bucket)
+		bucketName := fmt.Sprintf("%s%s%d", driverID, testConfig.BucketPrefix, bucket)
 		if shareBucketName {
 			bucketName = fmt.Sprintf("%s%d", testConfig.BucketPrefix, bucket)
 		}
@@ -268,9 +275,12 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 				new := ReadOperation{
 					TestName:                 testConfig.Name,
 					Bucket:                   bucketName,
-					ObjectName:               fmt.Sprintf("%s%s%d", workerID, testConfig.ObjectPrefix, object),
+					ObjectName:               fmt.Sprintf("%s%s%d", driverID, testConfig.ObjectPrefix, object),
 					ObjectSize:               objectSize,
 					WorksOnPreexistingObject: false,
+					MPUEnabled:               testConfig.Multipart.ReadMPUEnabled,
+					PartSize:                 testConfig.Multipart.ReadPartSize,
+					MPUConcurrency:           testConfig.Multipart.ReadConcurrency,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "existing_read":
@@ -284,6 +294,9 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 					ObjectName:               *PreExistingObjects.Contents[object%PreExistingObjectCount].Key,
 					ObjectSize:               uint64(*PreExistingObjects.Contents[object%PreExistingObjectCount].Size),
 					WorksOnPreexistingObject: true,
+					MPUEnabled:               testConfig.Multipart.ReadMPUEnabled,
+					PartSize:                 testConfig.Multipart.ReadPartSize,
+					MPUConcurrency:           testConfig.Multipart.ReadConcurrency,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "write":
@@ -292,10 +305,13 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 					log.WithError(err).Error("Could not increase operational Value - ignoring")
 				}
 				new := WriteOperation{
-					TestName:   testConfig.Name,
-					Bucket:     bucketName,
-					ObjectName: fmt.Sprintf("%s%s%d", workerID, testConfig.ObjectPrefix, object),
-					ObjectSize: objectSize,
+					TestName:       testConfig.Name,
+					Bucket:         bucketName,
+					ObjectName:     fmt.Sprintf("%s%s%d", driverID, testConfig.ObjectPrefix, object),
+					ObjectSize:     objectSize,
+					MPUEnabled:     testConfig.Multipart.WriteMPUEnabled,
+					PartSize:       testConfig.Multipart.WritePartSize,
+					MPUConcurrency: testConfig.Multipart.WriteConcurrency,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "list":
@@ -304,10 +320,13 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 					log.WithError(err).Error("Could not increase operational Value - ignoring")
 				}
 				new := ListOperation{
-					TestName:   testConfig.Name,
-					Bucket:     bucketName,
-					ObjectName: fmt.Sprintf("%s%s%d", workerID, testConfig.ObjectPrefix, object),
-					ObjectSize: objectSize,
+					TestName:       testConfig.Name,
+					Bucket:         bucketName,
+					ObjectName:     fmt.Sprintf("%s%s%d", driverID, testConfig.ObjectPrefix, object),
+					ObjectSize:     objectSize,
+					MPUEnabled:     testConfig.Multipart.WriteMPUEnabled,
+					PartSize:       testConfig.Multipart.WritePartSize,
+					MPUConcurrency: testConfig.Multipart.WriteConcurrency,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			case "delete":
@@ -316,10 +335,13 @@ func fillWorkqueue(testConfig *common.TestCaseConfiguration, Workqueue *Workqueu
 					log.WithError(err).Error("Could not increase operational Value - ignoring")
 				}
 				new := DeleteOperation{
-					TestName:   testConfig.Name,
-					Bucket:     bucketName,
-					ObjectName: fmt.Sprintf("%s%s%d", workerID, testConfig.ObjectPrefix, object),
-					ObjectSize: objectSize,
+					TestName:       testConfig.Name,
+					Bucket:         bucketName,
+					ObjectName:     fmt.Sprintf("%s%s%d", driverID, testConfig.ObjectPrefix, object),
+					ObjectSize:     objectSize,
+					MPUEnabled:     testConfig.Multipart.WriteMPUEnabled,
+					PartSize:       testConfig.Multipart.WritePartSize,
+					MPUConcurrency: testConfig.Multipart.WriteConcurrency,
 				}
 				*Workqueue.Queue = append(*Workqueue.Queue, new)
 			}

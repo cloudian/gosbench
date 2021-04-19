@@ -34,7 +34,6 @@ tests:
     objects:
       size_min: 5
       size_max: 100
-      part_size: 0
       # distribution: constant, random, sequential
       size_distribution: random
       unit: KB
@@ -47,6 +46,15 @@ tests:
       number_max: 10
       # distribution: constant, random, sequential
       number_distribution: constant
+    multipart:
+      write_mpu_enabled: true
+      write_part_size: 5
+      write_unit: MB
+      write_concurrency: 5
+      read_mpu_enabled: true
+      read_part_size: 5
+      read_unit: MB
+      read_concurrency: 5
     # Name prefix for buckets and objects
     bucket_prefix: 1255gosbench-
     object_prefix: obj
@@ -54,15 +62,15 @@ tests:
     # Runtime in time.Duration - do not forget the unit please
     # stop_with_runtime: 60s # Example with 60 seconds runtime
     stop_with_runtime:
-    # End after a set amount of operations (per worker)
+    # End after a set amount of operations (per driver)
     stop_with_ops: 10
     # Number of s3 performance test servers to run in parallel
-    workers: 2
-    # Set wheter workers share the same buckets or not
-    # If set to True - bucket names will have the worker # appended
-    workers_share_buckets: True
-    # Number of requests processed in parallel by each worker
-    parallel_clients: 3
+    drivers: 2
+    # Set wheter drivers share the same buckets or not
+    # If set to True - bucket names will have the driver # appended
+    drivers_share_buckets: True
+    # Number of requests processed in parallel by each driver
+    workers: 3
     # Remove all generated buckets and its content after run
     clean_after: True
 
