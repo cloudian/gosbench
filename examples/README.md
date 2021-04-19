@@ -66,7 +66,8 @@ read_concurrency - The number of threads used by the download manager to receive
 ## JSON Example Coniguration 
 ### S3 Configuration
 ```json
-{
+
+[
   { 
     "access_key": "abc", "secret_key": "as", 
     "region": "eu-central-1", "endpoint": "https://my.rgw.endpoint:8080", 
@@ -82,7 +83,8 @@ read_concurrency - The number of threads used by the download manager to receive
     "region": "eu-central-3", "endpoint": "https://my.rgw.endpoint:8080", 
     "skipSSLverify": false, "proxyHost": "http://localhost:1234" 
   }
-}
+]
+
 ```
 
 ### Test Coniguration
