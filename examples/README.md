@@ -6,7 +6,7 @@ The S3 configuration section allows for a list of S3 servers to be configured fo
 - **access_key** - Access key for S3 credentials
 - **secret_key** - Secret key for S3 credentials
 - **region** - Region to use for testing
-- **endpoint** - The full HTTP(S) URL to use for S3 request. This URl should include a port if needed. Example: http://s3-region1.servicenow.cloudian.tme:80
+- **endpoint** - The full HTTP(S) URL to use for S3 request. This URl should include a port if needed. Example: https://my.rgw.endpoint:8080
 - **skipSSLverify** - Should be set to true or false. True does not enforce strict validation of server certificate, false does enforce strict validation.
 - **proxyHost** - The full HTTP(S) URL to use for proxy request. This URl should include a port if needed. Example: http://localhost:1234
 
