@@ -87,7 +87,7 @@ read_concurrency - The number of threads used by the download manager to receive
 
 ```
 
-### Test f
+### Test Configuration
 ```json
 {
     "grafana_config": { "endpoint": "http://grafana", "username": "admin", "password": "grafana" },
@@ -132,7 +132,7 @@ read_concurrency - The number of threads used by the download manager to receive
 ...
 ```
 
-### Test f
+### Test Configuration
 ```yaml
 ---
 
