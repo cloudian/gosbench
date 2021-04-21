@@ -63,7 +63,7 @@ Top Level Options:
 - **read_unit** - The unit to use for read_part_size. Valid values are: B, K or KB, M or MB, G or GB, and T or TB. Either upper or lower case characters can be used.
 read_concurrency - The number of threads used by the download manager to receive parts simultaneously.
 
-## JSON Example Coniguration 
+## JSON Example Configuration 
 ### S3 Configuration
 ```json
 
@@ -87,7 +87,7 @@ read_concurrency - The number of threads used by the download manager to receive
 
 ```
 
-### Test Coniguration
+### Test f
 ```json
 {
     "grafana_config": { "endpoint": "http://grafana", "username": "admin", "password": "grafana" },
@@ -105,7 +105,7 @@ read_concurrency - The number of threads used by the download manager to receive
 }
 ```
 
-## YAML Example Coniguration 
+## YAML Example f 
 ### S3 Configuration
 ```yaml
 ---
@@ -132,8 +132,10 @@ read_concurrency - The number of threads used by the download manager to receive
 ...
 ```
 
-### Test Coniguration
+### Test f
 ```yaml
+---
+
 # For generating annotations when we start/stop test cases
 # https://grafana.com/docs/http_api/annotations/#create-annotation
 grafana_config:
@@ -190,5 +192,5 @@ tests:
     workers: 3
     # Remove all generated buckets and its content after run
     clean_after: True
-
+...
 ```
