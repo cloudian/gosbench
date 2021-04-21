@@ -1,18 +1,4 @@
 {
-    "s3_config": [
-        { 
-            "access_key": "abc", "secret_key": "as", "region": "eu-central-1", "endpoint": "https://my.rgw.endpoint:8080", 
-            "skipSSLverify": false, "proxyHost": "http://localhost:1234" 
-        },
-        { 
-            "access_key": "def", "secret_key": "as", "region": "eu-central-2", "endpoint": "https://my.rgw.endpoint:8080", 
-            "skipSSLverify": false, "proxyHost": "http://localhost:1234" 
-        },
-        { 
-            "access_key": "ghi", "secret_key": "as", "region": "eu-central-3", "endpoint": "https://my.rgw.endpoint:8080", 
-            "skipSSLverify": false, "proxyHost": "http://localhost:1234" 
-        }
-    ],
     "grafana_config": { "endpoint": "http://grafana", "username": "admin", "password": "grafana" },
     "tests": [
         { "name": "My first example test", "read_weight": 20, "existing_read_weight": 0, "write_weight": 80, "delete_weight": 0, 

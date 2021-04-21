@@ -1,10 +1,14 @@
 package common
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strings"
 	"time"
+
+	"gopkg.in/yaml.v2"
 
 	log "github.com/sirupsen/logrus"
 )
@@ -67,20 +71,20 @@ type TestCaseConfiguration struct {
 		ReadConcurrency  int    `yaml:"read_concurrency" json:"read_concurrency"`
 		ReadUnit         string `yaml:"read_unit" json:"read_unit"`
 	} `yaml:"multipart" json:"multipart"`
-	Name                string        `yaml:"name" json:"name"`
-	BucketPrefix        string        `yaml:"bucket_prefix" json:"bucket_prefix"`
-	ObjectPrefix        string        `yaml:"object_prefix" json:"object_prefix"`
-	Runtime             time.Duration `yaml:"stop_with_runtime" json:"stop_with_runtime"`
-	OpsDeadline         uint64        `yaml:"stop_with_ops" json:"stop_with_ops"`
-	Drivers             int           `yaml:"drivers" json:"drivers"`
-	DriversShareBuckets bool          `yaml:"drivers_share_buckets" json:"drivers_share_buckets"`
-	Workers             int           `yaml:"workers" json:"workers"`
-	CleanAfter          bool          `yaml:"clean_after" json:"clean_after"`
-	ReadWeight          int           `yaml:"read_weight" json:"read_weight"`
-	ExistingReadWeight  int           `yaml:"existing_read_weight" json:"existing_read_weight"`
-	WriteWeight         int           `yaml:"write_weight" json:"write_weight"`
-	ListWeight          int           `yaml:"list_weight" json:"list_weight"`
-	DeleteWeight        int           `yaml:"delete_weight" json:"delete_weight"`
+	Name                string   `yaml:"name" json:"name"`
+	BucketPrefix        string   `yaml:"bucket_prefix" json:"bucket_prefix"`
+	ObjectPrefix        string   `yaml:"object_prefix" json:"object_prefix"`
+	Runtime             Duration `yaml:"stop_with_runtime" json:"stop_with_runtime"`
+	OpsDeadline         uint64   `yaml:"stop_with_ops" json:"stop_with_ops"`
+	Drivers             int      `yaml:"drivers" json:"drivers"`
+	DriversShareBuckets bool     `yaml:"drivers_share_buckets" json:"drivers_share_buckets"`
+	Workers             int      `yaml:"workers" json:"workers"`
+	CleanAfter          bool     `yaml:"clean_after" json:"clean_after"`
+	ReadWeight          int      `yaml:"read_weight" json:"read_weight"`
+	ExistingReadWeight  int      `yaml:"existing_read_weight" json:"existing_read_weight"`
+	WriteWeight         int      `yaml:"write_weight" json:"write_weight"`
+	ListWeight          int      `yaml:"list_weight" json:"list_weight"`
+	DeleteWeight        int      `yaml:"delete_weight" json:"delete_weight"`
 }
 
 // Workloadconf the Grafana and test configuration
@@ -245,4 +249,46 @@ func getByteMultiplier(unit string) (uint64, error) {
 	default:
 		return 0, fmt.Errorf("Could not parse unit size - please use one of B/KB/MB/GB/TB")
 	}
+}
+
+type Duration time.Duration
+
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var v interface{}
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	switch value := v.(type) {
+	case float64:
+		*d = Duration(time.Duration(value))
+		return nil
+	case string:
+		tmp, err := time.ParseDuration(value)
+		if err != nil {
+			return err
+		}
+		*d = Duration(tmp)
+		return nil
+	default:
+		return errors.New("invalid duration")
+	}
+}
+
+func (d Duration) MarshalYAML() ([]byte, error) {
+	return yaml.Marshal(time.Duration(d).String())
+}
+
+func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var yamlDuration time.Duration
+	err := unmarshal(yamlDuration)
+	if err != nil {
+		return err
+	}
+
+	*d = Duration(yamlDuration)
+	return nil
 }

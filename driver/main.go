@@ -135,7 +135,7 @@ func PerfTest(testConfig *common.TestCaseConfiguration, Workqueue *Workqueue, dr
 	}
 	log.Infof("Started %d workers", testConfig.Workers)
 	if testConfig.Runtime != 0 {
-		workUntilTimeout(Workqueue, workChannel, testConfig.Runtime)
+		workUntilTimeout(Workqueue, workChannel, time.Duration(testConfig.Runtime))
 	} else {
 		workUntilOps(Workqueue, workChannel, testConfig.OpsDeadline, testConfig.Workers)
 	}
