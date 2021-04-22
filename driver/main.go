@@ -31,7 +31,7 @@ func init() {
 func main() {
 	var serverAddress string
 	flag.StringVar(&serverAddress, "s", "", "Gosbench Server IP and Port in the form '192.168.1.1:2000'")
-	flag.IntVar(&prometheusPort, "p", 8888, "Port on which the Prometheus Exporter will be available. Default: 8888")
+	flag.IntVar(&prometheusPort, "p", 9995, "Port on which the Prometheus Exporter will be available. Default: 9995")
 	flag.BoolVar(&debug, "d", false, "enable debug log output")
 	flag.BoolVar(&trace, "t", false, "enable trace log output")
 	flag.Parse()

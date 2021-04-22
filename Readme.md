@@ -20,7 +20,7 @@ INFO: `-d` activates debug logging, `-t` activates trace logging
 1. Build the driver: `go install github.com/mulbc/gosbench/driver`
 1. Run the driver, specifying the server connection details: `driver -s 192.168.1.1:2000`
 1. The driver will immediately connect to the server and will start to get to work.
-The driver opens port 8888 for the Prometheus exporter. Please make sure this port is allowed in your firewall and that you added the driver to the Prometheus config.
+The driver opens port 9995 for the Prometheus exporter. Please make sure this port is allowed in your firewall and that you added the driver to the Prometheus config.
 
 #### Prometheus configuration
 
@@ -40,8 +40,8 @@ scrape_configs:
     scrape_interval: 1s
     static_configs:
       - targets:
-        - DRIVER1.example.com:8888
-        - DRIVER2.example.com:8888
+        - DRIVER1.example.com:9995
+        - DRIVER2.example.com:9995
 ```
 
 To reload the configuration, you can either send a SIGHUP to your prometheus server or just restart it ;)
